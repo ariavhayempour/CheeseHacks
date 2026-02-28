@@ -31,7 +31,7 @@ Safely analyze suspicious links by tracing redirect chains and examining final d
 ## Prerequisites
 
 - Node.js (v18 or higher recommended)
-- Gemini API key from [Google AI Studio](https://ai.google.dev/)
+- Gemini API key
 
 ## Installation
 
