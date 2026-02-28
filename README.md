@@ -1,7 +1,3 @@
-# WebSec Sandbox
-
-A suite of advanced web security tools powered by Google's Gemini AI for analyzing and protecting against modern web threats.
-
 ## Features
 
 ### 🔍 QR Code Risk Analyzer
