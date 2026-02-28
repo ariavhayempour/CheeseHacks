@@ -1,7 +1,8 @@
-import React, { useState, useRef } from "react";
-import { Upload, QrCode, AlertTriangle, CheckCircle, Search, Loader2, ShieldAlert } from "lucide-react";
+import React, { useState, useRef, useEffect } from "react";
+import { Upload, QrCode, AlertTriangle, CheckCircle, Search, Loader2, ShieldAlert, Camera, X } from "lucide-react";
 import { motion } from "motion/react";
 import { GoogleGenAI, Type } from "@google/genai";
+import jsQR from "jsqr";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -19,7 +20,48 @@ export default function QRAnalyzer() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"upload" | "camera">("upload");
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    return () => { cameraStream?.getTracks().forEach(t => t.stop()); };
+  }, [cameraStream]);
+
+  const startCamera = async () => {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      setCameraStream(stream);
+      setMode("camera");
+      // Wait for video element to mount then assign stream
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      }, 0);
+    } catch {
+      setError("Could not access camera. Please allow camera permissions and try again.");
+    }
+  };
+
+  const stopCamera = () => {
+    cameraStream?.getTracks().forEach(t => t.stop());
+    setCameraStream(null);
+    setMode("upload");
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    canvas.getContext("2d")?.drawImage(videoRef.current, 0, 0);
+    setImage(canvas.toDataURL("image/png"));
+    setResult(null);
+    setError(null);
+    stopCamera();
+  };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -34,6 +76,26 @@ export default function QRAnalyzer() {
     }
   };
 
+  const decodeQRFromImage = (dataUrl: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("Canvas unavailable"));
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code) resolve(code.data);
+        else reject(new Error("No QR code found in the image. Please ensure the image contains a clear, well-lit QR code."));
+      };
+      img.onerror = () => reject(new Error("Failed to load image."));
+      img.src = dataUrl;
+    });
+  };
+
   const analyzeQR = async () => {
     if (!image) return;
 
@@ -41,21 +103,14 @@ export default function QRAnalyzer() {
     setError(null);
 
     try {
-      const base64Data = image.split(",")[1];
-      const mimeType = image.split(";")[0].split(":")[1];
+      const url = await decodeQRFromImage(image);
 
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.0-flash-lite",
         contents: {
           parts: [
             {
-              inlineData: {
-                data: base64Data,
-                mimeType: mimeType,
-              },
-            },
-            {
-              text: "Extract the URL from this QR code. Then analyze the URL for potential security risks. Provide a risk score from 0 to 100 (where 100 is extremely dangerous). Check for suspicious patterns like excessive subdomains, unusual TLDs, or obfuscation. Check if it looks like typosquatting of a popular domain. Estimate the domain age if possible, or state 'Unknown'. Return the result strictly in JSON format.",
+              text: `Analyze this URL extracted from a QR code for potential security risks: "${url}"\n\nProvide a risk score from 0 to 100 (where 100 is extremely dangerous). Check for suspicious patterns like excessive subdomains, unusual TLDs, or obfuscation. Check if it looks like typosquatting of a popular domain. Estimate the domain age if possible, or state 'Unknown'. Return the result strictly in JSON format.`,
             },
           ],
         },
@@ -64,7 +119,7 @@ export default function QRAnalyzer() {
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              url: { type: Type.STRING, description: "The extracted URL" },
+              url: { type: Type.STRING, description: "The URL being analyzed" },
               domainAge: { type: Type.STRING, description: "Estimated domain age or 'Unknown'" },
               suspiciousPatterns: {
                 type: Type.ARRAY,
@@ -82,10 +137,16 @@ export default function QRAnalyzer() {
 
       const jsonStr = response.text?.trim() || "{}";
       const parsed = JSON.parse(jsonStr) as AnalysisResult;
+      parsed.url = url; // always use the jsQR-decoded URL, not Gemini's
       setResult(parsed);
     } catch (err: any) {
       console.error("Analysis failed:", err);
-      setError("Failed to analyze the QR code. Please ensure the image contains a clear QR code.");
+      const msg: string = err?.message ?? "";
+      if (msg.includes("429") || msg.includes("quota") || msg.includes("RESOURCE_EXHAUSTED")) {
+        setError("API quota exceeded. Please wait a minute and try again.");
+      } else {
+        setError(msg || "Failed to analyze the QR code. Please ensure the image contains a clear QR code.");
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -109,43 +170,98 @@ export default function QRAnalyzer() {
 
       <div className="grid lg:grid-cols-2 gap-8">
         <div className="space-y-6">
-          <div
-            className={`border-2 border-dashed rounded-3xl p-8 text-center transition-all ${
-              image ? "border-zinc-700 bg-zinc-900/50" : "border-zinc-800 hover:border-emerald-500/50 hover:bg-zinc-900/50 cursor-pointer"
-            }`}
-            onClick={() => !image && fileInputRef.current?.click()}
-          >
-            {image ? (
-              <div className="relative aspect-square max-w-xs mx-auto rounded-2xl overflow-hidden border border-zinc-800 bg-white p-4">
-                <img src={image} alt="Uploaded QR" className="w-full h-full object-contain" />
+          {/* Mode toggle */}
+          {!image && (
+            <div className="flex gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-2xl">
+              <button
+                onClick={stopCamera}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  mode === "upload" ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                <Upload className="w-4 h-4" /> Upload
+              </button>
+              <button
+                onClick={startCamera}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  mode === "camera" ? "bg-zinc-700 text-white" : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                <Camera className="w-4 h-4" /> Camera
+              </button>
+            </div>
+          )}
+
+          {/* Camera view */}
+          {mode === "camera" && !image && (
+            <div className="relative rounded-3xl overflow-hidden border-2 border-zinc-700 bg-zinc-950">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full aspect-square object-cover"
+              />
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="w-48 h-48 border-2 border-emerald-400/60 rounded-2xl" />
+              </div>
+              <div className="absolute bottom-4 inset-x-0 flex items-center justify-center gap-4">
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setImage(null);
-                    setResult(null);
-                  }}
-                  className="absolute top-2 right-2 bg-zinc-900/80 text-white p-2 rounded-lg hover:bg-red-500/80 transition-colors backdrop-blur-sm"
+                  onClick={stopCamera}
+                  className="p-3 bg-zinc-900/80 backdrop-blur-sm text-zinc-300 rounded-full hover:bg-red-500/80 hover:text-white transition-all"
                 >
-                  <Upload className="w-4 h-4 rotate-180" />
+                  <X className="w-5 h-5" />
                 </button>
+                <button
+                  onClick={capturePhoto}
+                  className="w-16 h-16 bg-emerald-500 hover:bg-emerald-400 rounded-full border-4 border-white/20 transition-all active:scale-95"
+                />
               </div>
-            ) : (
-              <div className="py-12">
-                <div className="w-16 h-16 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-4 text-zinc-400">
-                  <Upload className="w-8 h-8" />
+            </div>
+          )}
+
+          {/* Upload dropzone */}
+          {mode === "upload" && (
+            <div
+              className={`border-2 border-dashed rounded-3xl p-8 text-center transition-all ${
+                image ? "border-zinc-700 bg-zinc-900/50" : "border-zinc-800 hover:border-emerald-500/50 hover:bg-zinc-900/50 cursor-pointer"
+              }`}
+              onClick={() => !image && fileInputRef.current?.click()}
+            >
+              {image ? (
+                <div className="relative aspect-square max-w-xs mx-auto rounded-2xl overflow-hidden border border-zinc-800 bg-white p-4">
+                  <img src={image} alt="Uploaded QR" className="w-full h-full object-contain" />
+                  <button
+                    onClick={(e: React.MouseEvent) => {
+                      e.stopPropagation();
+                      setImage(null);
+                      setResult(null);
+                    }}
+                    className="absolute top-2 right-2 bg-zinc-900/80 text-white p-2 rounded-lg hover:bg-red-500/80 transition-colors backdrop-blur-sm"
+                  >
+                    <Upload className="w-4 h-4 rotate-180" />
+                  </button>
                 </div>
-                <h3 className="text-lg font-medium text-zinc-200 mb-2">Upload QR Code</h3>
-                <p className="text-sm text-zinc-500">PNG, JPG, or WEBP up to 5MB</p>
-              </div>
-            )}
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleImageUpload}
-              accept="image/*"
-              className="hidden"
-            />
-          </div>
+              ) : (
+                <div className="py-12">
+                  <div className="w-16 h-16 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-4 text-zinc-400">
+                    <Upload className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-lg font-medium text-zinc-200 mb-2">Upload QR Code</h3>
+                  <p className="text-sm text-zinc-500">PNG, JPG, or WEBP up to 5MB</p>
+                </div>
+              )}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImageUpload}
+                accept="image/*"
+                className="hidden"
+              />
+            </div>
+          )}
+
+          <canvas ref={canvasRef} className="hidden" />
 
           {image && !result && (
             <button
