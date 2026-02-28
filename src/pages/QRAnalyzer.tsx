@@ -202,7 +202,7 @@ export default function QRAnalyzer() {
                 autoPlay
                 playsInline
                 muted
-                className="w-full aspect-square object-cover"
+                className="w-full aspect-square object-cover scale-x-[-1]"
               />
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                 <div className="w-48 h-48 border-2 border-emerald-400/60 rounded-2xl" />
