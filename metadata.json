@@ -1,0 +1,5 @@
+{
+  "name": "WebSec Sandbox",
+  "description": "Web security tools including QR Code Risk Analyzer and SecureLink Redirect Proxy.",
+  "requestFramePermissions": []
+}
